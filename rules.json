@@ -1,0 +1,5 @@
+{
+  "blocked_ips": ["192.168.1.10"],
+  "blocked_keywords": ["torrent", "facebook"],
+  "rate_limit": 10
+}
