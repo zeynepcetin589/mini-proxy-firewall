@@ -13,6 +13,7 @@ with open("rules.json") as f:
 
 BLOCKED_IPS = set(rules["blocked_ips"])
 BLOCKED_KEYWORDS = [k.encode() for k in rules["blocked_keywords"]]
+BLOCKED_DOMAINS = set(rules.get("blocked_domains", []))
 RATE_LIMIT = rules["rate_limit"]
 
 
@@ -24,14 +25,27 @@ parser.add_argument("--rate-limit", type=int, help="Set new rate limit")
 
 args = parser.parse_args()
 
+def save_rules():
+    with open("rules.json", "w") as f:
+        json.dump({
+            "blocked_ips": list(BLOCKED_IPS),
+            "blocked_keywords": [k.decode() for k in BLOCKED_KEYWORDS],
+            "blocked_domains": list(BLOCKED_DOMAINS),
+            "rate_limit": RATE_LIMIT
+        }, f, indent=4)
+
+
 if args.block_ip:
     BLOCKED_IPS.add(args.block_ip)
+    save_rules()
 
 if args.block_word:
     BLOCKED_KEYWORDS.append(args.block_word.encode())
+    save_rules()
 
 if args.rate_limit:
     RATE_LIMIT = args.rate_limit
+    save_rules()
 
 
 
@@ -50,6 +64,21 @@ def log(level, message):
     with open(LOG_FILE, "a") as f:
         f.write(f"[{datetime.now()}] [{level}] {message}\n")
 
+def parse_http_request(data):
+    try:
+        text = data.decode(errors="ignore")
+        lines = text.split("\r\n")
+
+        headers = {}
+        for line in lines[1:]:
+            if ": " in line:
+                key, value = line.split(": ", 1)
+                headers[key.lower()] = value.strip()
+
+        return headers
+    except:
+        return {}
+
 
 def start_firewall():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -66,14 +95,33 @@ def start_firewall():
 
 
 def handle_client(client_socket,addr):
-    remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    remote.connect((TARGET_HOST, TARGET_PORT))
-
+    remote = None
 
     while True:
         data = client_socket.recv(4096)
         if not data:
             break
+
+        headers = parse_http_request(data)
+        host = headers.get("host")
+
+        if not host:
+            client_socket.close()
+            return
+
+        if host in BLOCKED_DOMAINS:
+            log("BLOCK", f"Blocked domain: {host}")
+            client_socket.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked domain")
+            break
+
+        if host in BLOCKED_DOMAINS:
+            log("BLOCK", f"Blocked domain: {host}")
+            client_socket.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked domain")
+            break
+
+        if remote is None:
+            remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            remote.connect((host, 80))
 
         if not is_allowed(data):
             log("BLOCK", f"Blocked request from {addr}: {data[:50]}")
@@ -95,8 +143,6 @@ def handle_client(client_socket,addr):
 
         REQUESTS[addr[0]].append(now)
 
-        print("Request:")
-        print(data.decode(errors="ignore"))
 
         remote.sendall(data)
         response = remote.recv(4096)
@@ -104,8 +150,8 @@ def handle_client(client_socket,addr):
         client_socket.sendall(response)
 
     client_socket.close()
-    remote.close()
-
+    if remote:
+        remote.close()
 
 
 
