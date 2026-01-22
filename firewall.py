@@ -64,6 +64,7 @@ def log(level, message):
     with open(LOG_FILE, "a") as f:
         f.write(f"[{datetime.now()}] [{level}] {message}\n")
 
+
 def parse_http_request(data):
     try:
         text = data.decode(errors="ignore")
@@ -78,6 +79,53 @@ def parse_http_request(data):
         return headers
     except:
         return {}
+
+
+def is_allowed(data):
+    for word in BLOCKED_KEYWORDS:
+        if word in data.lower():
+            return False
+    return True
+
+
+def is_connect_request(data):
+    try:
+        return data.startswith(b"CONNECT")
+    except:
+        return False
+
+
+def handle_https_tunnel(client_socket, host_port):
+    host, port = host_port.split(":")
+    port = int(port)
+
+    try:
+        remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        remote.connect((host, port))
+
+        client_socket.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+
+        # Tunnel data both directions
+        client_socket.setblocking(False)
+        remote.setblocking(False)
+
+        sockets = [client_socket, remote]
+
+        while True:
+            for s in sockets:
+                try:
+                    data = s.recv(4096)
+                    if not data:
+                        return
+                    if s is client_socket:
+                        remote.sendall(data)
+                    else:
+                        client_socket.sendall(data)
+                except:
+                    pass
+    finally:
+        client_socket.close()
+        remote.close()
 
 
 def start_firewall():
@@ -102,8 +150,34 @@ def handle_client(client_socket,addr):
         if not data:
             break
 
+        if is_connect_request(data):
+            line = data.decode().split("\r\n")[0]
+            host_port = line.split(" ")[1]
+
+            host = host_port.split(":")[0]
+
+            if host in BLOCKED_DOMAINS:
+                log("BLOCK", f"Blocked HTTPS domain: {host}")
+                client_socket.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked by firewall")
+                break
+
+            log("INFO", f"HTTPS tunnel established to {host}")
+            handle_https_tunnel(client_socket, host_port)
+            return
+
         headers = parse_http_request(data)
-        host = headers.get("host")
+        host_header = headers.get("host")
+
+        if not host_header:
+            client_socket.close()
+            return
+
+        if ":" in host_header:
+            host, port = host_header.split(":")
+            port = int(port)
+        else:
+            host = host_header
+            port = 80
 
         if not host:
             client_socket.close()
@@ -114,14 +188,9 @@ def handle_client(client_socket,addr):
             client_socket.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked domain")
             break
 
-        if host in BLOCKED_DOMAINS:
-            log("BLOCK", f"Blocked domain: {host}")
-            client_socket.sendall(b"HTTP/1.1 403 Forbidden\r\n\r\nBlocked domain")
-            break
-
         if remote is None:
             remote = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            remote.connect((host, 80))
+            remote.connect((host, port))
 
         if not is_allowed(data):
             log("BLOCK", f"Blocked request from {addr}: {data[:50]}")
@@ -152,15 +221,6 @@ def handle_client(client_socket,addr):
     client_socket.close()
     if remote:
         remote.close()
-
-
-
-def is_allowed(data):
-    for word in BLOCKED_KEYWORDS:
-        if word in data.lower():
-            return False
-    return True
-
 
 
 start_firewall()
